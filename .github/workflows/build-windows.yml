@@ -1,0 +1,84 @@
+name: Build Windows installer
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          architecture: x64
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-dev.txt "pyinstaller>=6.10"
+
+      - name: Run tests
+        run: python -m pytest -q
+
+      - name: Build the program
+        run: >-
+          python -m PyInstaller --noconfirm --windowed --name "Scanning Wizard"
+          --icon assets\icon.ico
+          --add-data "models;models" --add-data "assets;assets"
+          --collect-submodules keyring --hidden-import keyring.backends.Windows
+          --copy-metadata keyring --copy-metadata httpx2 --copy-metadata anthropic
+          --hidden-import wizard_selftest --hidden-import wizard_updates
+          scanning_wizard.py
+
+      # Only the Rekognition part of Amazon's service catalogue is used (about 80 MB less),
+      # and OpenCV's video plugin is never used (straightening only reads still pictures).
+      - name: Trim unused files
+        shell: pwsh
+        run: |
+          $internal = "dist\Scanning Wizard\_internal"
+          Get-ChildItem "$internal\botocore\data" -Directory |
+            Where-Object { $_.Name -notin @("rekognition", "sts") } |
+            Remove-Item -Recurse -Force
+          Remove-Item "$internal\cv2\opencv_videoio_ffmpeg*.dll" -ErrorAction SilentlyContinue
+          "{0:N0} MB" -f ((Get-ChildItem "dist\Scanning Wizard" -Recurse | Measure-Object Length -Sum).Sum / 1MB)
+
+      - name: Self-test the built program
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath "dist\Scanning Wizard\Scanning Wizard.exe" -ArgumentList "--selftest", "$PWD\selftest-built.txt" -Wait -PassThru
+          if (Test-Path selftest-built.txt) { Get-Content selftest-built.txt }
+          if ($p.ExitCode -ne 0) { Write-Error "Self-test failed (exit $($p.ExitCode))"; exit 1 }
+
+      - name: Build the installer
+        shell: pwsh
+        run: |
+          choco install innosetup -y --no-progress
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer\ScanningWizard.iss
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+      - name: Install it and self-test the installed copy
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath "dist\ScanningWizardSetup.exe" -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/CURRENTUSER" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { Write-Error "Installer failed (exit $($p.ExitCode))"; exit 1 }
+          $exe = Join-Path $env:LOCALAPPDATA "Programs\Scanning Wizard\Scanning Wizard.exe"
+          if (-not (Test-Path $exe)) { Write-Error "Not installed at $exe"; exit 1 }
+          $lnk = Join-Path ([Environment]::GetFolderPath("Desktop")) "Scanning Wizard.lnk"
+          if (-not (Test-Path $lnk)) { Write-Error "No desktop icon at $lnk"; exit 1 }
+          $p = Start-Process -FilePath $exe -ArgumentList "--selftest", "$PWD\selftest-installed.txt" -Wait -PassThru
+          if (Test-Path selftest-installed.txt) { Get-Content selftest-installed.txt }
+          if ($p.ExitCode -ne 0) { Write-Error "Installed self-test failed (exit $($p.ExitCode))"; exit 1 }
+          "{0:N1} MB installer" -f ((Get-Item dist\ScanningWizardSetup.exe).Length / 1MB)
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ScanningWizardSetup
+          path: |
+            dist/ScanningWizardSetup.exe
+            selftest-*.txt

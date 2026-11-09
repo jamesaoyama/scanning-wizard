@@ -35,7 +35,7 @@ except ImportError:  # the launcher installs it; this keeps the module importabl
 log = logging.getLogger("scanning_wizard")
 
 APP_NAME = "Scanning Wizard"
-APP_VERSION = "4.0"
+APP_VERSION = "4.0.0"
 USER_AGENT = f"ScanningWizard/{APP_VERSION} (photo listing tool)"
 Image.MAX_IMAGE_PIXELS = None  # big scans are our own files, not untrusted uploads
 
@@ -50,6 +50,7 @@ YUNET_MODEL = app_dir() / "models" / "face_detection_yunet_2023mar.onnx"
 CONFIG_PATH = Path(os.environ.get("SCANNING_WIZARD_CONFIG")
                    or (Path.home() / ".scanning_wizard_config.json"))
 LOG_PATH = CONFIG_PATH.with_name(".scanning_wizard.log")
+UPDATE_STATE = CONFIG_PATH.with_name(".scanning_wizard_update.json")
 DATA_DIR = "wizard data"
 
 # ─── Listing text ─────────────────────────────────────────────────────────────
@@ -188,7 +189,9 @@ class SecretStore:
 
     def __init__(self, backend=None):
         self.backend = backend
-        if backend is None:
+        if backend is None and os.environ.get("SCANNING_WIZARD_NO_KEYRING"):
+            self.backend = False          # the self-test never touches the real credential store
+        elif backend is None:
             try:
                 import keyring
                 keyring.get_password(self.SERVICE, "__check__")

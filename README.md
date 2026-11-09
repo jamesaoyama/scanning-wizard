@@ -25,12 +25,17 @@ Everything is saved as it goes. If the window is closed or something fails, **Co
 
 ## Installing on the shop PC
 
-1. Install Python 3.10 or newer from python.org, ticking "Add python.exe to PATH".
-2. Copy this whole folder (it includes the `models` folder) to the PC.
-3. Double-click **Start Scanning Wizard.bat**. The first start installs the packages it needs, which takes a few minutes.
-4. Open **Settings** and add:
+1. Download and run the installer (Windows 8.1 or newer, no Python needed):
+   **https://github.com/jamesaoyama/scanning-wizard/releases/latest/download/ScanningWizardSetup.exe**
+
+   It installs for the current user, with no admin prompt, and puts an icon on the desktop.
+2. Open **Settings** and add:
    - **Upload:** the FTP username and password.
    - **Identify:** at least one AI key.
+
+**Updates:** Scanning Wizard checks for a new version at most every 6 hours, or when you click **Check for updates**. When there is one, a bar offers **Update now**: it downloads the installer, checks its size and SHA-256 fingerprint, installs it and opens again. Settings and batches are kept.
+
+**Running from the code instead:** install Python 3.10 or newer, then double-click **Start Scanning Wizard.bat**. The first start installs the packages it needs. A copy run this way can't update itself; **Update now** opens the download page instead.
 
 Settings from v3 carry over:
 - The keys move into Windows Credential Manager.
@@ -54,6 +59,8 @@ The Test button next to each key checks it. The start screen shows a rough cost 
 
 - `scanning_wizard.py`: the window.
 - `wizard_core.py`: everything else (titles, images, services, the batch steps).
+- `wizard_updates.py`: the update check and download. `wizard_selftest.py`: the self-test the Windows build runs.
+- `installer/` and `.github/workflows/`: the Windows installer and its build. `assets/`: the icon.
 - `models/`: the YuNet face model used for straightening (OpenCV Zoo, MIT licence).
 - `scanning_wizard_v3_original.py`: the previous version, kept for reference.
 - `Finished Images Wizard\wizard data\`: one file per batch, recording how far each photo got.
@@ -69,3 +76,18 @@ python -m pytest tests
 Optional settings for the test run:
 - `WIZARD_FACE_PHOTO=<a one-face photo>` adds the straightening tests.
 - `WIZARD_NETWORK_TESTS=1` checks real films against Wikidata.
+
+## Publishing a new version
+
+1. Set the new number in two places: `APP_VERSION` in `wizard_core.py` and `AppVersion` in `installer/ScanningWizard.iss`. A test checks that they match.
+2. Commit and push to `main`. GitHub Actions then:
+   - runs the tests on Windows;
+   - builds the program and self-tests it;
+   - builds the installer, installs it, and self-tests the installed copy.
+3. When that run passes, download its `ScanningWizardSetup` artifact and publish it:
+
+   ```
+   gh release create v4.0.1 ScanningWizardSetup.exe --title "Scanning Wizard 4.0.1" --notes "What changed"
+   ```
+
+Installed copies see the new version within 6 hours.

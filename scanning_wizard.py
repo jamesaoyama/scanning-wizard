@@ -220,11 +220,25 @@ class App:
         self.screen = None
         self.style_ttk()
 
+        icon = core.app_dir() / "assets" / "icon.ico"
+        if sys.platform == "win32" and icon.is_file():
+            try:
+                root.iconbitmap(default=str(icon))
+            except tk.TclError:
+                pass
         top = tk.Frame(root, bg=C["bg2"], height=60)
         top.pack(fill="x")
         top.pack_propagate(False)
-        label(top, "Scanning Wizard 2026", 18, "bright", "bold", bg="bg2").pack(side="left", padx=20)
+        label(top, "Scanning Wizard 2026", 18, "bright", "bold", bg="bg2").pack(side="left", padx=(20, 8))
+        label(top, f"v{core.APP_VERSION}", 10, "dim", bg="bg2").pack(side="left", pady=(8, 0))
         FlatButton(top, "Settings", self.open_settings, "normal").pack(side="right", padx=20, pady=12)
+        check = tk.Label(top, text="Check for updates", font=font(10, "underline"), fg=C["dim"], bg=C["bg2"],
+                         cursor="hand2")
+        check.pack(side="right")
+        check.bind("<Button-1>", lambda e: self.check_updates(manual=True))
+        self.update_bar = None
+        self.available_update = None
+        self._update_checking = False
         self.body = tk.Frame(root, bg=C["bg"])
         self.body.pack(fill="both", expand=True)
         root.protocol("WM_DELETE_WINDOW", self.on_close)
@@ -233,6 +247,7 @@ class App:
         root.bind_all("<Button-5>", on_wheel)
         self.poll()
         self.show_start()
+        root.after(3000, self.auto_check_updates)
 
     def style_ttk(self):
         s = ttk.Style()
@@ -319,6 +334,111 @@ class App:
             w.destroy()
         self.on_event = None
         self.screen = None
+
+    # --- updates
+    def auto_check_updates(self):
+        if updates.checks_enabled() and updates.check_due(core.UPDATE_STATE):
+            self.check_updates(manual=False)
+
+    def check_updates(self, manual=True):
+        if not updates.checks_enabled():
+            if manual:
+                messagebox.showinfo("Updates", "Update checks are turned off.")
+            return
+        if self._update_checking:
+            return
+        self._update_checking = True
+
+        def job():
+            try:
+                release, error = updates.latest_release(core.APP_VERSION), ""
+            except updates.UpdateError as e:
+                release, error = None, str(e)
+            except Exception as e:
+                core.log.exception("Update check failed")
+                release, error = None, f"Couldn't check for updates: {e}"
+            self.call_ui(self._update_checked, release, error, manual)
+
+        threading.Thread(target=job, daemon=True).start()
+
+    def _update_checked(self, release, error, manual):
+        self._update_checking = False
+        if not error:
+            updates.record_check(core.UPDATE_STATE)
+        if release is not None and updates.is_newer(release.version, core.APP_VERSION):
+            self.available_update = release
+            self.show_update_bar()
+            core.log.info("Version %s is available", release.version)
+        elif manual:
+            messagebox.showinfo("Updates", error or f"You have the latest version ({core.APP_VERSION}).")
+
+    def show_update_bar(self):
+        if self.update_bar is not None:
+            self.update_bar.destroy()
+        rel = self.available_update
+        bar = tk.Frame(self.root, bg=C["card"], padx=20, pady=8)
+        bar.pack(fill="x", before=self.body)
+        label(bar, f"Scanning Wizard {rel.version} is available.", 11, "bright", "bold", bg="card").pack(side="left")
+        FlatButton(bar, "Later", lambda: bar.destroy(), "quiet", size=10).pack(side="right")
+        FlatButton(bar, "Update now", self.update_now, "good", size=10, bold=True).pack(side="right", padx=8)
+        self.update_bar = bar
+
+    def update_now(self):
+        import tempfile
+        import webbrowser
+        rel = self.available_update
+        if rel is None:
+            return
+        if not updates.can_install_itself():
+            webbrowser.open(rel.page)
+            return
+        if self.busy():
+            messagebox.showinfo("Update", "Let the wizard finish (or press Stop), then click Update now again.")
+            return
+        if not messagebox.askyesno("Update Scanning Wizard",
+                                   f"Install Scanning Wizard {rel.version}?\n\nIt will close, update itself and open "
+                                   "again (about a minute). Your settings and batches are kept."):
+            return
+        dest = os.path.join(tempfile.gettempdir(), f"ScanningWizardSetup-{rel.version}.exe")
+        win = tk.Toplevel(self.root)
+        win.title("Updating Scanning Wizard")
+        win.configure(bg=C["bg"])
+        win.transient(self.root)
+        label(win, "Downloading the update…", 12, "text").pack(padx=30, pady=(20, 8))
+        bar = ttk.Progressbar(win, mode="determinate", maximum=max(rel.size, 1), length=360)
+        bar.pack(padx=30)
+        cancel = threading.Event()
+        FlatButton(win, "Cancel", cancel.set, "quiet", size=10).pack(pady=14)
+
+        def job():
+            try:
+                path = updates.download(rel, dest, core.APP_VERSION, cancelled=cancel.is_set,
+                                        progress=lambda got, total: self.call_ui(lambda: bar.configure(value=got)))
+                self.call_ui(downloaded, path, "")
+            except updates.UpdateError as e:
+                self.call_ui(downloaded, None, str(e))
+            except Exception as e:
+                core.log.exception("Update download failed")
+                self.call_ui(downloaded, None, f"The update couldn't be downloaded: {e}")
+
+        def downloaded(path, error):
+            win.destroy()
+            if error:
+                if not cancel.is_set():
+                    messagebox.showwarning("Update", error)
+                return
+            if self.busy():
+                messagebox.showinfo("Update", "The update is ready. Let the wizard finish, then click "
+                                              "Update now again.")
+                return
+            core.log.info("Installing Scanning Wizard %s", rel.version)
+            if self.screen and hasattr(self.screen, "flush"):
+                self.screen.flush()
+            flags = 0x00000008 | 0x00000200 if sys.platform == "win32" else 0   # detached, own group
+            subprocess.Popen(updates.install_command(path), creationflags=flags)
+            self.root.destroy()
+
+        threading.Thread(target=job, daemon=True).start()
 
     # --- screens
     def show_start(self):
@@ -1345,10 +1465,16 @@ class SettingsDialog(tk.Toplevel):
 # ─── Start ────────────────────────────────────────────────────────────────────
 
 core = None
+updates = None
 
 
 def main():
-    global core, FAMILY
+    global core, updates, FAMILY
+    if "--selftest" in sys.argv:          # used by the Windows build to prove the installer works
+        i = sys.argv.index("--selftest")
+        report = sys.argv[i + 1] if len(sys.argv) > i + 1 else None
+        import wizard_selftest
+        sys.exit(wizard_selftest.run(report, sys.modules[__name__]))
     root = tk.Tk()
     root.withdraw()
     log_path = Path(os.environ.get("SCANNING_WIZARD_CONFIG") or (Path.home() / ".scanning_wizard_config.json")).with_name(".scanning_wizard.log")
@@ -1360,7 +1486,8 @@ def main():
 
     missing_optional = install_missing(root)
     import wizard_core
-    core = wizard_core
+    import wizard_updates
+    core, updates = wizard_core, wizard_updates
     family = tkfont.nametofont("TkDefaultFont").actual("family")
     FAMILY = "Segoe UI" if sys.platform == "win32" else family
     App(root, missing_optional)

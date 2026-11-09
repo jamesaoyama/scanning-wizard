@@ -11,6 +11,7 @@ import pytest
 tk = pytest.importorskip("tkinter")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import wizard_core as core  # noqa: E402
+import wizard_updates  # noqa: E402
 import scanning_wizard as sw  # noqa: E402
 from test_core import MemKeyring, photo  # noqa: E402
 
@@ -66,7 +67,9 @@ def app(tmp_path, monkeypatch):
     photo(scans / "a.jpg", (900, 1200))
     photo(scans / "b.jpg", (1200, 900))
     (scans / "broken.jpg").write_bytes(b"not a picture")
+    monkeypatch.setenv("SCANNING_WIZARD_UPDATE_URL", "off")
     sw.core = core
+    sw.updates = wizard_updates
     sw.FAMILY = "Helvetica"
     root = tk.Tk()
     root.withdraw()
@@ -262,3 +265,49 @@ def test_rows_are_locked_while_saving_and_an_interrupted_save_can_be_finished(ap
     app.screen.cont(pending[0])
     pump(root, lambda: isinstance(app.screen, sw.DoneScreen))
     assert core.Batch.unfinished(app.cfg["output_folder"]) == []
+
+
+def test_updates_bar_download_and_install(app, monkeypatch, tmp_path):
+    root = app.root
+    newer = wizard_updates.Release(version="4.1.0", url="https://example.test/S.exe", size=3,
+                                   sha256=None, notes="", page="https://example.test/release")
+    monkeypatch.setattr(wizard_updates, "checks_enabled", lambda: True)
+    monkeypatch.setattr(wizard_updates, "record_check", lambda path, now=None: None)
+
+    # up to date: says so
+    monkeypatch.setattr(wizard_updates, "latest_release", lambda version, session=None: wizard_updates.Release(
+        version=core.APP_VERSION, url="", size=0, sha256=None, notes="", page=""))
+    app.check_updates(manual=True)
+    pump(root, lambda: app.shown["info"])
+    assert "latest version" in app.shown["info"][-1][1] and app.update_bar is None
+
+    # newer: the bar appears
+    monkeypatch.setattr(wizard_updates, "latest_release", lambda version, session=None: newer)
+    app.check_updates(manual=False)
+    pump(root, lambda: app.update_bar is not None)
+    assert any("4.1.0 is available" in t for t in texts(app.update_bar))
+
+    # running from the .py files: opens the download page
+    opened = []
+    import webbrowser
+    monkeypatch.setattr(webbrowser, "open", lambda url: opened.append(url))
+    monkeypatch.setattr(wizard_updates, "can_install_itself", lambda: False)
+    app.update_now()
+    assert opened == ["https://example.test/release"]
+
+    # installed copy: downloads, runs the installer silently and closes
+    started, closed = [], []
+    monkeypatch.setattr(wizard_updates, "can_install_itself", lambda: True)
+
+    def fake_download(rel, dest, version, progress=None, cancelled=None, session=None):
+        Path(dest).write_bytes(b"exe")
+        progress(3, 3)
+        return dest
+
+    monkeypatch.setattr(wizard_updates, "download", fake_download)
+    monkeypatch.setattr(sw.subprocess, "Popen", lambda cmd, creationflags=0: started.append(cmd))
+    monkeypatch.setattr(app.root, "destroy", lambda: closed.append(True))
+    app.update_now()
+    pump(root, lambda: closed)
+    assert started[0][0].endswith("ScanningWizardSetup-4.1.0.exe") and started[0][-1] == "/RELAUNCH=1"
+    assert not app.shown["errors"]
