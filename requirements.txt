@@ -1,0 +1,8 @@
+Pillow
+requests
+opencv-python-headless
+numpy
+boto3
+anthropic
+keyring
+send2trash
